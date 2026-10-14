@@ -1,0 +1,369 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forex Signal Bot V2</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:#0b1020;color:#edf2ff;font:15px/1.5 Arial,sans-serif}
+main{max-width:760px;margin:auto}
+.panel{background:#151d30;border:1px solid #34415b;border-radius:14px;padding:16px;margin:14px 0}
+h1{font-size:27px;margin-bottom:4px}
+h3{margin-top:0}
+p,.muted{color:#a9b8d0;overflow-wrap:anywhere}
+label{display:block;margin:12px 0 5px}
+input,select,button{width:100%;padding:12px;border-radius:8px;border:1px solid #34415b;margin:5px 0;font-size:15px}
+input,select{background:#0b1324;color:white}
+button{background:#76a9ff;color:#071326;font-weight:bold;border:0;cursor:pointer}
+button:disabled{opacity:.55}
+.secondary{background:#29364d;color:white}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.metric{background:#0b1324;padding:12px;border-radius:8px;overflow-wrap:anywhere;min-width:0}
+.metric small{display:block;color:#a9b8d0}
+.metric strong{font-size:17px;overflow-wrap:anywhere}
+#signal{text-align:center;font-size:27px;font-weight:bold;padding:18px;background:#202c42;border-radius:9px}
+.buy{color:#27d99b}.sell{color:#ff657a}.wait{color:#ffd479}
+.status{font-size:13px;overflow-wrap:anywhere}
+table{width:100%;font-size:12px;border-collapse:collapse}
+td,th{text-align:left;padding:8px 4px;border-bottom:1px solid #34415b}
+.note{font-size:12px}
+</style>
+</head>
+<body>
+<main>
+<h1>Forex Signal Bot V2</h1>
+<p>Real candle data · EMA crossover · Manual trading only</p>
+
+<section class="panel">
+<h3>Market settings</h3>
+<label for="pair">Forex pair</label>
+<select id="pair">
+<option value="EUR/USD">EUR/USD</option>
+<option value="GBP/USD">GBP/USD</option>
+<option value="USD/JPY">USD/JPY</option>
+<option value="AUD/USD">AUD/USD</option>
+<option value="USD/CAD">USD/CAD</option>
+<option value="EUR/GBP">EUR/GBP</option>
+</select>
+
+<label for="tf">Timeframe</label>
+<select id="tf">
+<option value="5min">5 minutes</option>
+<option value="15min">15 minutes</option>
+<option value="1h">1 hour</option>
+</select>
+
+<label for="api">Twelve Data API key</label>
+<input id="api" type="password" autocomplete="off"
+placeholder="Paste your API key here">
+<p class="note">Enter your key only on the published page. Do not put it into this public source code or share it with anyone.</p>
+
+<button id="run">FETCH DATA &amp; ANALYZE</button>
+<button id="refresh" class="secondary">REFRESH DATA</button>
+<p id="status" class="status">Not connected. Enter your API key to begin.</p>
+</section>
+
+<section class="panel">
+<h3>Current signal</h3>
+<div id="signal" class="wait">WAIT</div>
+<p id="reason">No analysis performed yet.</p>
+<div class="grid">
+<div class="metric"><small>Latest close</small><strong id="price">—</strong></div>
+<div class="metric"><small>Latest candle time</small><strong id="time">—</strong></div>
+<div class="metric"><small>EMA 9</small><strong id="e9">—</strong></div>
+<div class="metric"><small>EMA 21</small><strong id="e21">—</strong></div>
+<div class="metric"><small>Suggested entry</small><strong id="entry">—</strong></div>
+<div class="metric"><small>ATR 14</small><strong id="atr">—</strong></div>
+<div class="metric"><small>Suggested Stop Loss</small><strong id="sl">—</strong></div>
+<div class="metric"><small>Suggested Take Profit</small><strong id="tp">—</strong></div>
+</div>
+<p class="note">A signal is not a guarantee of profit. WAIT means the crossover rules did not confirm a new setup.</p>
+</section>
+
+<section class="panel">
+<h3>Signal history</h3>
+<p id="count">0 signals recorded.</p>
+<div style="overflow-x:auto">
+<table>
+<thead><tr><th>Recorded</th><th>Pair</th><th>Signal</th><th>Entry</th></tr></thead>
+<tbody id="history"></tbody>
+</table>
+</div>
+<button id="csv" class="secondary">EXPORT CSV</button>
+<button id="clear" class="secondary">CLEAR HISTORY</button>
+</section>
+
+<p class="note">V2 is an experimental analysis tool, not an automated trader or a proven profitable strategy.</p>
+</main>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+let records = [];
+let lastAnalysisKey = "";
+
+function setStatus(message) {
+  $("status").textContent = message;
+}
+
+function formatPrice(n) {
+  if (!Number.isFinite(n)) return "—";
+  return n.toFixed(5);
+}
+
+function calculateEMA(values, period) {
+  if (values.length < period) {
+    throw new Error("Not enough candles to calculate EMA " + period + ".");
+  }
+
+  // Seed EMA with the SMA of the first period values.
+  let current = values.slice(0, period)
+    .reduce((sum, value) => sum + value, 0) / period;
+  const multiplier = 2 / (period + 1);
+
+  for (let i = period; i < values.length; i++) {
+    current = values[i] * multiplier +
+      current * (1 - multiplier);
+  }
+
+  return current;
+}
+
+function calculateATR(candles, period = 14) {
+  if (candles.length < period + 1) {
+    throw new Error("Not enough candles to calculate ATR 14.");
+  }
+
+  const trueRanges = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const current = candles[i];
+    const previous = candles[i - 1];
+
+    trueRanges.push(Math.max(
+      current.high - current.low,
+      Math.abs(current.high - previous.close),
+      Math.abs(current.low - previous.close)
+    ));
+  }
+
+  const recent = trueRanges.slice(-period);
+  return recent.reduce((sum, value) => sum + value, 0) /
+    recent.length;
+}
+
+function showSignal(signal, reason) {
+  $("signal").textContent = signal;
+  $("signal").className = signal.toLowerCase();
+  $("reason").textContent = reason;
+}
+
+function clearMetrics() {
+  ["price","time","e9","e21","entry","atr","sl","tp"]
+    .forEach(id => $(id).textContent = "—");
+  showSignal("WAIT", "No verified analysis available.");
+}
+
+async function analyze() {
+  const apiKey = $("api").value.trim();
+  const pair = $("pair").value;
+  const interval = $("tf").value;
+
+  if (!apiKey) {
+    setStatus("Missing API key. Paste your Twelve Data key into the field above.");
+    return;
+  }
+
+  $("run").disabled = true;
+  $("refresh").disabled = true;
+  setStatus("Requesting Forex candles from Twelve Data…");
+
+  try {
+    const url = new URL("https://api.twelvedata.com/time_series");
+    url.searchParams.set("symbol", pair);
+    url.searchParams.set("interval", interval);
+    url.searchParams.set("outputsize", "100");
+    url.searchParams.set("apikey", apiKey);
+    url.searchParams.set("format", "JSON");
+
+    const response = await fetch(url.toString());
+    let data;
+
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error("The API response was not valid JSON. Try again later.");
+    }
+
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status +
+        ". Check your internet connection or API service.");
+    }
+
+    if (!data || data.status === "error" || data.code || !data.values) {
+      throw new Error(
+        data && data.message
+          ? data.message
+          : "No candle values received. Check the key, pair and API limits."
+      );
+    }
+
+    const candles = data.values.map(v => ({
+      time: v.datetime,
+      open: Number(v.open),
+      high: Number(v.high),
+      low: Number(v.low),
+      close: Number(v.close)
+    })).reverse();
+
+    if (candles.length < 30) {
+      throw new Error("Only " + candles.length +
+        " candles received. At least 30 are needed.");
+    }
+
+    if (candles.some(c =>
+      !c.time ||
+      !Number.isFinite(c.open) ||
+      !Number.isFinite(c.high) ||
+      !Number.isFinite(c.low) ||
+      !Number.isFinite(c.close) ||
+      c.high < c.low
+    )) {
+      throw new Error("The API returned incomplete or invalid candle data.");
+    }
+
+    const closes = candles.map(c => c.close);
+    const last = candles[candles.length - 1];
+
+    // Calculate EMA using the same chronological candle series.
+    const ema9 = calculateEMA(closes, 9);
+    const ema21 = calculateEMA(closes, 21);
+    const atr = calculateATR(candles, 14);
+
+    // Compare EMA values at the previous and latest candle.
+    const prevCloses = closes.slice(0, -1);
+    const previousEMA9 = calculateEMA(prevCloses, 9);
+    const previousEMA21 = calculateEMA(prevCloses, 21);
+
+    let signal = "WAIT";
+    let reason = "No fresh EMA crossover. Wait for the next setup.";
+
+    if (previousEMA9 <= previousEMA21 && ema9 > ema21) {
+      signal = "BUY";
+      reason = "EMA 9 crossed above EMA 21 on the latest returned candle.";
+    } else if (previousEMA9 >= previousEMA21 && ema9 < ema21) {
+      signal = "SELL";
+      reason = "EMA 9 crossed below EMA 21 on the latest returned candle.";
+    }
+
+    // Display verified market data and indicator values.
+    $("price").textContent = formatPrice(last.close);
+    $("time").textContent = last.time;
+    $("e9").textContent = formatPrice(ema9);
+    $("e21").textContent = formatPrice(ema21);
+    $("atr").textContent = formatPrice(atr);
+
+    const entry = last.close;
+    const sl = signal === "BUY" ? entry - 1.5 * atr :
+               signal === "SELL" ? entry + 1.5 * atr : NaN;
+    const tp = signal === "BUY" ? entry + 3 * atr :
+               signal === "SELL" ? entry - 3 * atr : NaN;
+
+    $("entry").textContent = signal === "WAIT" ? "—" : formatPrice(entry);
+    $("sl").textContent = formatPrice(sl);
+    $("tp").textContent = formatPrice(tp);
+    showSignal(signal, reason);
+
+    const analysisKey = pair + "|" + interval + "|" +
+      last.time + "|" + signal;
+
+    if (signal !== "WAIT" && analysisKey !== lastAnalysisKey) {
+      records.unshift({
+        time: new Date().toISOString(),
+        pair: pair,
+        signal: signal,
+        entry: entry
+      });
+      lastAnalysisKey = analysisKey;
+      renderHistory();
+    }
+
+    setStatus(
+      "SUCCESS: Received " + candles.length +
+      " candles from Twelve Data. Latest candle: " + last.time +
+      ". Check its timestamp to assess freshness."
+    );
+
+  } catch (error) {
+    clearMetrics();
+    setStatus("DATA/ANALYSIS ERROR: " +
+      (error && error.message ? error.message : String(error)));
+  } finally {
+    $("run").disabled = false;
+    $("refresh").disabled = false;
+  }
+}
+
+function renderHistory() {
+  $("count").textContent = records.length + " signals recorded.";
+  const tbody = $("history");
+  tbody.replaceChildren();
+
+  records.forEach(record => {
+    const row = document.createElement("tr");
+    [record.time, record.pair, record.signal,
+      formatPrice(record.entry)].forEach(value => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.appendChild(cell);
+    });
+    tbody.appendChild(row);
+  });
+}
+
+$("run").addEventListener("click", analyze);
+$("refresh").addEventListener("click", analyze);
+
+$("clear").addEventListener("click", () => {
+  records = [];
+  lastAnalysisKey = "";
+  renderHistory();
+  setStatus("Signal history cleared.");
+});
+
+$("csv").addEventListener("click", () => {
+  if (!records.length) {
+    setStatus("No BUY/SELL signals to export yet.");
+    return;
+  }
+
+  const rows = [
+    ["Recorded","Pair","Signal","Entry"],
+    ...records.map(r => [r.time,r.pair,r.signal,r.entry])
+  ];
+
+  const csv = rows.map(row =>
+    row.map(value =>
+      '"' + String(value).replace(/"/g, '""') + '"'
+    ).join(",")
+  ).join("\r\n");
+
+  const blob = new Blob([csv], {
+    type: "text/csv;charset=utf-8;"
+  });
+  const objectURL = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectURL;
+  link.download = "forex-signal-history.csv";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+});
+</script>
+</body>
+</html>
